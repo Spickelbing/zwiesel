@@ -1,3 +1,4 @@
+use crate::common::{bind_stream, FramedStream};
 use bytes::Bytes;
 use futures::{future::select_all, SinkExt, StreamExt};
 use rand::{thread_rng, Rng};
@@ -6,16 +7,8 @@ use std::io;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::mpsc;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
-
-pub type FramedStream = Framed<TcpStream, LengthDelimitedCodec>;
-
-pub fn bind_stream(stream: TcpStream) -> FramedStream {
-    Framed::new(stream, LengthDelimitedCodec::new())
-}
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -30,7 +23,7 @@ pub enum ServerError {
     #[error("client does not exist: {0}")]
     ClientDoesNotExist(ClientId),
     #[error("client {0} disconnected")]
-    ClientDisconnected(ClientId),
+    ClientDisconnect(ClientId),
 }
 
 type Result<T, E = ServerError> = std::result::Result<T, E>;
