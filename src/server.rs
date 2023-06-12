@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use thiserror::Error;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::mpsc;
 
@@ -30,7 +30,7 @@ type Result<T, E = ServerError> = std::result::Result<T, E>;
 /// To shut the server down, drop it.
 pub struct Server {
     pub local_addr: SocketAddr,
-    new_connections_rx: mpsc::Receiver<Result<Connection>>,
+    listener: TcpListener,
     clients: HashMap<ClientId, Client>,
 }
 
@@ -39,11 +39,14 @@ struct Client {
     stream: FramedStream,
 }
 
-pub type ClientId = u128;
+pub type ClientId = u64;
 
 impl Client {
-    fn new(addr: SocketAddr, stream: FramedStream) -> Self {
-        Self { addr, stream }
+    fn new(addr: SocketAddr, stream: TcpStream) -> Self {
+        Self {
+            addr,
+            stream: bind_stream(stream),
+        }
     }
 }
 
@@ -62,13 +65,10 @@ impl Server {
         let local_addr = listener
             .local_addr()
             .map_err(|e| ServerError::Bind(socket, e))?;
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::spawn(listen(listener, tx));
 
         Ok(Self {
+            listener,
             local_addr,
-            new_connections_rx: rx,
             clients: HashMap::new(),
         })
     }
@@ -142,23 +142,18 @@ impl Server {
         }
     }
 
-    async fn accept(rx: &mut mpsc::Receiver<Result<Connection>>) -> Result<Connection> {
-        match rx.recv().await {
-            Some(maybe_connection) => maybe_connection,
-            None => unreachable!(),
-        }
-    }
-
+    /// This method needs to be `.await`ed in order for any inbound events
+    /// such as connection attempts and incoming messages to be processed.
     pub async fn event(&mut self) -> Result<Event> {
         select! {
-            maybe_connection = Self::accept(&mut self.new_connections_rx) => {
-                let connection = maybe_connection?;
+            maybe_connection = self.listener.accept() => {
+                let (stream, addr) = maybe_connection.map_err(ServerError::Accept)?;
                 let mut rng = thread_rng();
                 let mut id: ClientId = rng.gen();
                 while self.clients.contains_key(&id) { // this really is a bit dumb, too
                     id = rng.gen();
                 }
-                let client = Client::new(connection.addr, connection.stream);
+                let client = Client::new(addr, stream);
                 self.clients.insert(id, client);
                 Ok(Event::NewConnection(id))
             }
@@ -192,31 +187,5 @@ impl Server {
 
     pub fn clients(&self) -> Vec<ClientId> {
         self.clients.keys().copied().collect()
-    }
-}
-
-struct Connection {
-    addr: SocketAddr,
-    stream: FramedStream,
-}
-
-impl Connection {
-    fn new(addr: SocketAddr, stream: FramedStream) -> Self {
-        Self { addr, stream }
-    }
-}
-
-async fn try_accept_connection(listener: &mut TcpListener) -> Result<Connection> {
-    let (stream, addr) = listener.accept().await.map_err(ServerError::Accept)?;
-    let stream = bind_stream(stream);
-    Ok(Connection::new(addr, stream))
-}
-
-async fn listen(mut listener: TcpListener, tx: mpsc::Sender<Result<Connection>>) {
-    loop {
-        let maybe_client = try_accept_connection(&mut listener).await;
-        if tx.send(maybe_client).await.is_err() {
-            break; // channel closed by the server, stop listening
-        }
     }
 }
