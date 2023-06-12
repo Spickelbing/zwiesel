@@ -1,5 +1,5 @@
 use crate::common::{bind_stream, FramedStream};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::{future::select_all, SinkExt, StreamExt};
 use rand::{thread_rng, Rng};
 use std::collections::HashMap;
@@ -22,16 +22,15 @@ pub enum ServerError {
     Bind(SocketAddr, io::Error),
     #[error("client does not exist: {0}")]
     ClientDoesNotExist(ClientId),
-    #[error("client {0} disconnected")]
-    ClientDisconnect(ClientId),
 }
 
 type Result<T, E = ServerError> = std::result::Result<T, E>;
 
 /// A server that works with framed streams.
+/// To shut the server down, drop it.
 pub struct Server {
     pub local_addr: SocketAddr,
-    new_connections_rx: mpsc::Receiver<Result<Client>>,
+    new_connections_rx: mpsc::Receiver<Result<Connection>>,
     clients: HashMap<ClientId, Client>,
 }
 
@@ -40,13 +39,20 @@ struct Client {
     stream: FramedStream,
 }
 
+pub type ClientId = u128;
+
 impl Client {
     fn new(addr: SocketAddr, stream: FramedStream) -> Self {
         Self { addr, stream }
     }
 }
 
-pub type ClientId = u128;
+#[derive(Debug)]
+pub enum Event {
+    NewConnection(ClientId),
+    Disconnect(ClientId, Option<ServerError>),
+    Frame(ClientId, Bytes),
+}
 
 impl Server {
     pub async fn bind(socket: SocketAddr) -> Result<Self> {
@@ -67,7 +73,7 @@ impl Server {
         })
     }
 
-    /// In case of errors, this method disconnects the respective clients.
+    /// Errors indicate that the respective clients are no longer connected.
     pub async fn broadcast_frame(
         &mut self,
         frame: Bytes,
@@ -95,7 +101,7 @@ impl Server {
         }
     }
 
-    /// In case of an error, this method disconnects the respective client.
+    /// Errors indicate that the respective client is no longer connected.
     pub async fn send_frame(&mut self, client_id: ClientId, frame: Bytes) -> Result<()> {
         let client = self
             .clients
@@ -115,54 +121,59 @@ impl Server {
         }
     }
 
-    /// In case of an error, this method disconnects the respective client.
-    pub async fn recv_frame(&mut self) -> Result<(ClientId, Bytes)> {
-        let mut clients: Vec<(&ClientId, &mut Client)> = self.clients.iter_mut().collect(); // this is pretty dumb
+    async fn recv_frame(
+        clients: &mut HashMap<ClientId, Client>,
+    ) -> (ClientId, Option<Result<BytesMut, io::Error>>) {
+        if clients.is_empty() {
+            // pend forever so that `select_all` doesn't panic
+            let (_tx, mut rx) = mpsc::channel::<bool>(1);
+            rx.recv().await;
+        }
+
+        let mut clients: Vec<(&ClientId, &mut Client)> = clients.iter_mut().collect(); // this is pretty dumb
         let frame_futures = clients.iter_mut().map(|(_, v)| v.stream.next());
 
         select! {
-            next_frame = select_all(frame_futures) => {
-                match next_frame {
-                    (Some(msg), idx, ..) => {
-                        let maybe_msg = msg.map_err(ServerError::ReadFrame);
-                        match maybe_msg {
-                            Ok(msg) => {
-                                return Ok((*clients[idx].0, msg.into()));
-                            }
-                            Err(err) => {
-                                let id = *clients[idx].0;
-                                self.clients.remove(&id);
-                                return Err(err);
-                            }
-                        }
-                    }
-                    (None, idx, ..) => {
-                        let id = *clients[idx].0;
-                        self.clients.remove(&id);
-                        return Err(ServerError::ClientDisconnect(id));
-                    }
-                }
+            maybe_frame = select_all(frame_futures) => {
+                let (maybe_frame, idx, _) = maybe_frame;
+                let id = *clients[idx].0; // this is why I needed the vec above
+                (id, maybe_frame)
             }
         }
     }
 
-    // TODO: make it possible to recv and accept at the same time
-    pub async fn accept(&mut self) -> Result<ClientId> {
-        match self.new_connections_rx.recv().await {
-            Some(maybe_client) => {
-                let client = maybe_client?;
+    async fn accept(rx: &mut mpsc::Receiver<Result<Connection>>) -> Result<Connection> {
+        match rx.recv().await {
+            Some(maybe_connection) => maybe_connection,
+            None => unreachable!(),
+        }
+    }
 
+    pub async fn event(&mut self) -> Result<Event> {
+        select! {
+            maybe_connection = Self::accept(&mut self.new_connections_rx) => {
+                let connection = maybe_connection?;
                 let mut rng = thread_rng();
                 let mut id: ClientId = rng.gen();
-                while self.clients.contains_key(&id) {
+                while self.clients.contains_key(&id) { // this really is a bit dumb, too
                     id = rng.gen();
                 }
+                let client = Client::new(connection.addr, connection.stream);
                 self.clients.insert(id, client);
-
-                Ok(id)
+                Ok(Event::NewConnection(id))
             }
-            None => {
-                unreachable!()
+            (client_id, maybe_frame) = Self::recv_frame(&mut self.clients) => {
+                match maybe_frame {
+                    Some(Ok(frame)) => Ok(Event::Frame(client_id, frame.freeze())),
+                    Some(Err(err)) => {
+                        self.clients.remove(&client_id);
+                        Ok(Event::Disconnect(client_id, Some(ServerError::ReadFrame(err))))
+                    }
+                    None => {
+                        self.clients.remove(&client_id);
+                        Ok(Event::Disconnect(client_id, None))
+                    }
+                }
             }
         }
     }
@@ -184,13 +195,24 @@ impl Server {
     }
 }
 
-async fn try_accept_connection(listener: &mut TcpListener) -> Result<Client> {
-    let (stream, addr) = listener.accept().await.map_err(ServerError::Accept)?;
-    let stream = bind_stream(stream);
-    Ok(Client::new(addr, stream))
+struct Connection {
+    addr: SocketAddr,
+    stream: FramedStream,
 }
 
-async fn listen(mut listener: TcpListener, tx: mpsc::Sender<Result<Client>>) {
+impl Connection {
+    fn new(addr: SocketAddr, stream: FramedStream) -> Self {
+        Self { addr, stream }
+    }
+}
+
+async fn try_accept_connection(listener: &mut TcpListener) -> Result<Connection> {
+    let (stream, addr) = listener.accept().await.map_err(ServerError::Accept)?;
+    let stream = bind_stream(stream);
+    Ok(Connection::new(addr, stream))
+}
+
+async fn listen(mut listener: TcpListener, tx: mpsc::Sender<Result<Connection>>) {
     loop {
         let maybe_client = try_accept_connection(&mut listener).await;
         if tx.send(maybe_client).await.is_err() {

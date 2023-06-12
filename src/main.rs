@@ -5,7 +5,7 @@ mod server;
 use bincode::{deserialize, serialize};
 use bytes::Bytes;
 use client::Client;
-use server::Server;
+use server::{Event, Server};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 #[tokio::main]
@@ -19,10 +19,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = Server::bind(socket.into()).await?;
     let mut client = Client::connect(socket.into()).await?;
 
-    {
-        let client = server.accept().await?;
-        println!("[server] sending '{server_msg}' to '{client}'");
-        server.send_frame(client, server_frame.clone()).await?;
+    match server.event().await? {
+        Event::NewConnection(client_id) => {
+            println!("[server] new connection: {}", client_id);
+            println!("[server] sending '{server_msg}' to '{client_id}'");
+            server.send_frame(client_id, server_frame.clone()).await?;
+        }
+        event => {
+            println!("[server] unexpected event: {:?}", event);
+        }
     }
 
     {
@@ -33,10 +38,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.send_frame(client_frame).await?;
     }
 
-    {
-        let (client, recv_frame) = server.recv_frame().await?;
-        let recv_msg: String = deserialize(&recv_frame)?;
-        println!("[server] received '{recv_msg}' from '{client}'");
+    match server.event().await? {
+        Event::Frame(client_id, frame) => {
+            let recv_msg: String = deserialize(&frame)?;
+            println!("[server] received '{recv_msg}' from '{client_id}'");
+        }
+        event => {
+            println!("[server] unexpected event: {:?}", event);
+        }
     }
 
     Ok(())
