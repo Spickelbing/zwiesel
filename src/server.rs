@@ -5,10 +5,10 @@ use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::task::Poll;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -126,8 +126,7 @@ impl Server {
     ) -> (ClientId, Option<Result<BytesMut, io::Error>>) {
         if clients.is_empty() {
             // pend forever so that `select_all` doesn't panic
-            let (_tx, mut rx) = mpsc::channel::<bool>(1);
-            rx.recv().await;
+            ForeverPending.await.forever()
         }
 
         let mut clients: Vec<(&ClientId, &mut Client)> = clients.iter_mut().collect(); // this is pretty dumb
@@ -187,5 +186,28 @@ impl Server {
 
     pub fn clients(&self) -> Vec<ClientId> {
         self.clients.keys().copied().collect()
+    }
+}
+
+struct ForeverPending;
+
+impl ForeverPending {
+    /// Call this method only after `await`ing `ForeverPending`, like so:
+    /// ```
+    /// ForeverPending.await.forever()
+    /// ```
+    /// It will pend forever.
+    /// # Panics
+    /// Always panics.
+    fn forever(&self) -> ! {
+        panic!("ForeverPending::forever() was called, which should never happen")
+    }
+}
+
+impl std::future::Future for ForeverPending {
+    type Output = ForeverPending;
+
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
     }
 }
