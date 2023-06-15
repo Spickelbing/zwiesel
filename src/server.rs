@@ -58,6 +58,9 @@ pub enum Event {
 }
 
 impl Server {
+    /// Sets up the server and binds it to a socket.
+    /// To process any kind of inbound network event, including connection attempts,
+    /// you need to `.await` the `event()` method.
     pub async fn host(socket: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(socket)
             .await
