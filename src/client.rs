@@ -1,7 +1,9 @@
 use crate::common::{bind_stream, FramedStream};
+use crate::protocol::{Message, MessageError};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use std::io;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -16,15 +18,21 @@ pub enum ClientError {
     Connect(SocketAddr, io::Error),
     #[error("remote server disconnected")]
     ServerDisconnect,
+    #[error("{0}")]
+    Message(#[from] MessageError),
 }
 
 /// A client that works with framed streams.
-pub struct Client {
+pub struct Client<T> {
     stream: FramedStream,
     pub remote_addr: SocketAddr,
+    phantom: PhantomData<T>,
 }
 
-impl Client {
+impl<T> Client<T>
+where
+    T: Message,
+{
     pub async fn connect(socket: SocketAddr) -> Result<Self, ClientError> {
         let stream = TcpStream::connect(socket)
             .await
@@ -33,10 +41,11 @@ impl Client {
         Ok(Self {
             stream: framed,
             remote_addr: socket,
+            phantom: PhantomData,
         })
     }
 
-    pub async fn recv_frame(&mut self) -> Result<Bytes, ClientError> {
+    async fn recv_frame(&mut self) -> Result<Bytes, ClientError> {
         let frame = self
             .stream
             .next()
@@ -46,11 +55,23 @@ impl Client {
         Ok(frame.into())
     }
 
-    pub async fn send_frame(&mut self, frame: Bytes) -> Result<(), ClientError> {
+    pub async fn recv(&mut self) -> Result<T, ClientError> {
+        let frame = self.recv_frame().await?;
+        let msg = T::deserialize(frame)?;
+        Ok(msg)
+    }
+
+    async fn send_frame(&mut self, frame: Bytes) -> Result<(), ClientError> {
         self.stream
             .send(frame)
             .await
             .map_err(ClientError::SendFrame)?;
+        Ok(())
+    }
+
+    pub async fn send(&mut self, msg: &T) -> Result<(), ClientError> {
+        let frame = msg.serialize()?;
+        self.send_frame(frame).await?;
         Ok(())
     }
 }

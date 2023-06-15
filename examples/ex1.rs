@@ -1,24 +1,39 @@
 use bincode::{deserialize, serialize};
 use bytes::Bytes;
-use server::{Client, Event, Server};
+use serde::{Deserialize, Serialize};
+use server::{Client, Event, Message, MessageError, Server};
 use std::net::{Ipv4Addr, SocketAddrV4};
+
+#[derive(Debug, Serialize, Deserialize)]
+enum MySuperNiceProtocol {
+    StringMessage(String),
+}
+
+impl Message for MySuperNiceProtocol {
+    fn serialize(&self) -> Result<Bytes, MessageError> {
+        Ok(serialize(self).map_err(|_| MessageError::Serialize)?.into())
+    }
+
+    fn deserialize(message: Bytes) -> Result<Self, MessageError> {
+        Ok(deserialize(&message).map_err(|_| MessageError::Deserialize)?)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4711);
-    let server_msg = "Hello, client!";
-    let client_msg = "Hello, server!";
-    let server_frame: Bytes = serialize(&server_msg)?.into();
-    let client_frame: Bytes = serialize(&client_msg)?.into();
+    let server_msg = MySuperNiceProtocol::StringMessage("Hello, client!".to_string());
+    let client_msg = MySuperNiceProtocol::StringMessage("Hello, server!".to_string());
 
-    let mut server = Server::host(socket.into()).await?;
-    let mut client = Client::connect(socket.into()).await?;
+    let mut server: Server<MySuperNiceProtocol> = Server::host(socket.into()).await?;
+    let mut client: Client<MySuperNiceProtocol> = Client::connect(socket.into()).await?;
 
+    println!("[server] waiting for any network event...");
     match server.event().await? {
         Event::NewConnection(client_id) => {
             println!("[server] new connection: {}", client_id);
-            println!("[server] sending '{server_msg}' to '{client_id}'");
-            server.send_frame(client_id, server_frame.clone()).await?;
+            println!("[server] sending '{server_msg:?}' to '{client_id}'");
+            server.send(client_id, &server_msg).await?;
         }
         event => {
             println!("[server] unexpected event: {:?}", event);
@@ -26,17 +41,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
-        let recv_frame = client.recv_frame().await?;
-        let recv_msg: String = deserialize(&recv_frame)?;
-        println!("[client] received '{recv_msg}'");
-        println!("[client] sending '{client_msg}'");
-        client.send_frame(client_frame).await?;
+        println!("[client] waiting for message...");
+        let msg = client.recv().await?;
+        println!("[client] received '{msg:?}'");
+        println!("[client] sending '{client_msg:?}'");
+        client.send(&client_msg).await?;
     }
 
+    println!("[server] waiting for any network event...");
     match server.event().await? {
-        Event::Frame(client_id, frame) => {
-            let recv_msg: String = deserialize(&frame)?;
-            println!("[server] received '{recv_msg}' from '{client_id}'");
+        Event::Message(client_id, msg) => {
+            println!("[server] received '{msg:?}' from '{client_id}'");
         }
         event => {
             println!("[server] unexpected event: {:?}", event);

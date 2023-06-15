@@ -1,9 +1,11 @@
 use crate::common::{bind_stream, FramedStream};
+use crate::protocol::{Message, MessageError};
 use bytes::{Bytes, BytesMut};
 use futures::{future::select_all, SinkExt, StreamExt};
 use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::io;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::task::Poll;
 use thiserror::Error;
@@ -12,26 +14,29 @@ use tokio::select;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
-    #[error("error receiving frame: {0}")]
+    #[error("failed to read frame: {0}")]
     ReadFrame(io::Error),
-    #[error("error sending frame: {0}")]
+    #[error("failed to send frame: {0}")]
     SendFrame(io::Error),
     #[error("failed to accept new connection: {0}")]
     Accept(io::Error),
     #[error("failed to bind to socket {0}: {1}")]
     Bind(SocketAddr, io::Error),
-    #[error("client does not exist: {0}")]
+    #[error("failed to perform action for client {0}: client does not exist")]
     ClientDoesNotExist(ClientId),
+    #[error("{0}")]
+    Message(#[from] MessageError),
 }
 
 type Result<T, E = ServerError> = std::result::Result<T, E>;
 
 /// A server that works with framed streams.
 /// To shut the server down, drop it.
-pub struct Server {
+pub struct Server<T> {
     pub local_addr: SocketAddr,
     listener: TcpListener,
     clients: HashMap<ClientId, Client>,
+    phantom: PhantomData<T>,
 }
 
 struct Client {
@@ -51,13 +56,19 @@ impl Client {
 }
 
 #[derive(Debug)]
-pub enum Event {
+pub enum Event<T>
+where
+    T: Message,
+{
     NewConnection(ClientId),
     Disconnect(ClientId, Option<ServerError>),
-    Frame(ClientId, Bytes),
+    Message(ClientId, T),
 }
 
-impl Server {
+impl<T> Server<T>
+where
+    T: Message,
+{
     /// Sets up the server and binds it to a socket.
     /// To process any kind of inbound network event, including connection attempts,
     /// you need to `.await` the `event()` method.
@@ -73,11 +84,11 @@ impl Server {
             listener,
             local_addr,
             clients: HashMap::new(),
+            phantom: PhantomData,
         })
     }
 
-    /// Errors indicate that the respective clients are no longer connected.
-    pub async fn broadcast_frame(
+    async fn broadcast_frame(
         &mut self,
         frame: Bytes,
     ) -> Result<(), HashMap<ClientId, ServerError>> {
@@ -104,8 +115,17 @@ impl Server {
         }
     }
 
-    /// Errors indicate that the respective client is no longer connected.
-    pub async fn send_frame(&mut self, client_id: ClientId, frame: Bytes) -> Result<()> {
+    /// Errors indicate that the respective clients are no longer connected.
+    // TODO: get rid of nested result somehow
+    pub async fn broadcast(
+        &mut self,
+        message: &T,
+    ) -> Result<Result<(), HashMap<ClientId, ServerError>>> {
+        let frame = message.serialize()?;
+        Ok(self.broadcast_frame(frame).await)
+    }
+
+    async fn send_frame(&mut self, client_id: ClientId, frame: Bytes) -> Result<()> {
         let client = self
             .clients
             .get_mut(&client_id)
@@ -122,6 +142,12 @@ impl Server {
                 Err(err)
             }
         }
+    }
+
+    /// Errors indicate that the respective client is no longer connected.
+    pub async fn send(&mut self, client_id: ClientId, message: &T) -> Result<()> {
+        let frame = message.serialize()?;
+        self.send_frame(client_id, frame).await
     }
 
     async fn recv_frame(
@@ -146,7 +172,7 @@ impl Server {
 
     /// This method needs to be `.await`ed in order for any inbound events
     /// such as connection attempts and incoming messages to be processed.
-    pub async fn event(&mut self) -> Result<Event> {
+    pub async fn event(&mut self) -> Result<Event<T>> {
         select! {
             maybe_connection = self.listener.accept() => {
                 let (stream, addr) = maybe_connection.map_err(ServerError::Accept)?;
@@ -161,7 +187,10 @@ impl Server {
             }
             (client_id, maybe_frame) = Self::recv_frame(&mut self.clients) => {
                 match maybe_frame {
-                    Some(Ok(frame)) => Ok(Event::Frame(client_id, frame.freeze())),
+                    Some(Ok(frame)) => {
+                        let message = T::deserialize(frame.freeze())?;
+                        Ok(Event::Message(client_id, message))
+                    },
                     Some(Err(err)) => {
                         self.clients.remove(&client_id);
                         Ok(Event::Disconnect(client_id, Some(ServerError::ReadFrame(err))))
@@ -195,8 +224,8 @@ impl Server {
 struct ForeverPending;
 
 impl ForeverPending {
-    /// Call this method only after `await`ing `ForeverPending`, like so:
-    /// ```
+    /// Call this method only after `.await`ing `ForeverPending`, like so:
+    /// ```no_run
     /// ForeverPending.await.forever()
     /// ```
     /// It will pend forever.
