@@ -150,7 +150,7 @@ impl Server {
                 let (stream, addr) = maybe_connection.map_err(ServerError::Accept)?;
                 let mut rng = thread_rng();
                 let mut id: ClientId = rng.gen();
-                while self.clients.contains_key(&id) { // this really is a bit dumb, too
+                while self.clients.contains_key(&id) {
                     id = rng.gen();
                 }
                 let client = Client::new(addr, stream);
