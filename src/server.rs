@@ -4,6 +4,7 @@ use bytes::{Bytes, BytesMut};
 use futures::{future::select_all, SinkExt, StreamExt};
 use rand::{thread_rng, Rng};
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::io;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
@@ -44,7 +45,20 @@ struct Client {
     stream: FramedStream,
 }
 
-pub type ClientId = u64;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClientId(u64);
+
+impl ClientId {
+    fn gen() -> Self {
+        Self(thread_rng().gen())
+    }
+}
+
+impl Display for ClientId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
 
 impl Client {
     fn new(addr: SocketAddr, stream: TcpStream) -> Self {
@@ -176,10 +190,9 @@ where
         select! {
             maybe_connection = self.listener.accept() => {
                 let (stream, addr) = maybe_connection.map_err(ServerError::Accept)?;
-                let mut rng = thread_rng();
-                let mut id: ClientId = rng.gen();
+                let mut id = ClientId::gen();
                 while self.clients.contains_key(&id) {
-                    id = rng.gen();
+                    id = ClientId::gen();
                 }
                 let client = Client::new(addr, stream);
                 self.clients.insert(id, client);
