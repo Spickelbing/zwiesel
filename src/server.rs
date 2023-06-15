@@ -58,7 +58,7 @@ pub enum Event {
 }
 
 impl Server {
-    pub async fn bind(socket: SocketAddr) -> Result<Self> {
+    pub async fn host(socket: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(socket)
             .await
             .map_err(|e| ServerError::Bind(socket, e))?;
