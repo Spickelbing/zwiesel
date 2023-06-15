@@ -22,7 +22,7 @@ pub enum ClientError {
     Message(#[from] MessageError),
 }
 
-/// A client that works with framed streams.
+/// A client for network protocol `T`.
 pub struct Client<T> {
     stream: FramedStream,
     pub remote_addr: SocketAddr,

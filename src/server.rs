@@ -31,8 +31,8 @@ pub enum ServerError {
 
 type Result<T, E = ServerError> = std::result::Result<T, E>;
 
-/// A server that works with framed streams.
-/// To shut the server down, drop it.
+/// A server for network protocol `T`.
+/// To shut the server down, simply drop it.
 pub struct Server<T> {
     pub local_addr: SocketAddr,
     listener: TcpListener,
@@ -184,6 +184,7 @@ where
         }
     }
 
+    /// Waits for any inbound network event to occur.
     /// This method needs to be `.await`ed in order for any inbound events
     /// such as connection attempts and incoming messages to be processed.
     pub async fn event(&mut self) -> Result<Event<T>> {
