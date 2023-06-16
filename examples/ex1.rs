@@ -1,8 +1,8 @@
 use bincode::{deserialize, serialize};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use server::{Client, ClientEvent, Message, MessageError, Server, ServerEvent};
 use std::net::{Ipv4Addr, SocketAddrV4};
+use zwiesel::{Client, ClientEvent, Message, MessageError, Server, ServerEvent};
 
 #[derive(Debug, Serialize, Deserialize)]
 enum MySuperNiceProtocol {
