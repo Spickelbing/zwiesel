@@ -19,7 +19,7 @@ impl Message for MySuperNiceProtocol {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4711);
     let server_msg = MySuperNiceProtocol::StringMessage("Hello, client!".to_string());
