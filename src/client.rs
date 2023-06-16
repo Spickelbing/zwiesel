@@ -22,7 +22,9 @@ pub enum ClientError {
     Message(#[from] MessageError),
 }
 
-/// A client for network protocol `T`.
+type Result<T, E = ClientError> = std::result::Result<T, E>;
+
+/// A client for a server using network protocol `T`.
 pub struct Client<T> {
     stream: FramedStream,
     pub remote_addr: SocketAddr,
@@ -33,35 +35,44 @@ impl<T> Client<T>
 where
     T: Message,
 {
-    pub async fn connect(socket: SocketAddr) -> Result<Self, ClientError> {
+    pub async fn connect(socket: SocketAddr) -> Result<Self> {
         let stream = TcpStream::connect(socket)
             .await
+            .map_err(|e| ClientError::Connect(socket, e))?;
+        let remote_addr = stream
+            .peer_addr()
             .map_err(|e| ClientError::Connect(socket, e))?;
         let framed = bind_stream(stream);
         Ok(Self {
             stream: framed,
-            remote_addr: socket,
+            remote_addr,
             phantom: PhantomData,
         })
     }
 
-    async fn recv_frame(&mut self) -> Result<Bytes, ClientError> {
-        let frame = self
-            .stream
-            .next()
-            .await
-            .ok_or(ClientError::ServerDisconnect)?
-            .map_err(ClientError::ReadFrame)?;
-        Ok(frame.into())
+    async fn recv_frame(&mut self) -> Option<Result<Bytes>> {
+        let maybe_frame = self.stream.next().await;
+        match maybe_frame {
+            Some(Ok(frame)) => Some(Ok(frame.freeze())),
+            Some(Err(err)) => Some(Err(ClientError::ReadFrame(err))),
+            None => None,
+        }
     }
 
-    pub async fn recv(&mut self) -> Result<T, ClientError> {
-        let frame = self.recv_frame().await?;
-        let msg = T::deserialize(frame)?;
-        Ok(msg)
+    /// Waits for any inbound network event.
+    pub async fn event(&mut self) -> Result<Event<T>> {
+        let maybe_frame = self.recv_frame().await;
+        match maybe_frame {
+            Some(Ok(frame)) => {
+                let msg = T::deserialize(frame)?;
+                Ok(Event::Message(msg))
+            }
+            Some(Err(err)) => Ok(Event::Disconnect(Some(err))),
+            None => Ok(Event::Disconnect(None)),
+        }
     }
 
-    async fn send_frame(&mut self, frame: Bytes) -> Result<(), ClientError> {
+    async fn send_frame(&mut self, frame: Bytes) -> Result<()> {
         self.stream
             .send(frame)
             .await
@@ -69,9 +80,18 @@ where
         Ok(())
     }
 
-    pub async fn send(&mut self, msg: &T) -> Result<(), ClientError> {
+    pub async fn send(&mut self, msg: &T) -> Result<()> {
         let frame = msg.serialize()?;
         self.send_frame(frame).await?;
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub enum Event<T>
+where
+    T: Message,
+{
+    Message(T),
+    Disconnect(Option<ClientError>),
 }

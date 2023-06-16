@@ -3,9 +3,9 @@ mod common;
 mod protocol;
 mod server;
 
-pub use client::{Client, ClientError};
+pub use client::{Client, ClientError, Event as ClientEvent};
 pub use protocol::{Message, MessageError};
-pub use server::{ClientId, Event, Server, ServerError};
+pub use server::{ClientId, Event as ServerEvent, Server, ServerError};
 
 #[cfg(test)]
 mod tests {

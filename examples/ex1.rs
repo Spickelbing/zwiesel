@@ -1,7 +1,7 @@
 use bincode::{deserialize, serialize};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use server::{Client, Event, Message, MessageError, Server};
+use server::{Client, ClientEvent, Message, MessageError, Server, ServerEvent};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -15,7 +15,7 @@ impl Message for MySuperNiceProtocol {
     }
 
     fn deserialize(message: Bytes) -> Result<Self, MessageError> {
-        Ok(deserialize(&message).map_err(|_| MessageError::Deserialize)?)
+        deserialize(&message).map_err(|_| MessageError::Deserialize)
     }
 }
 
@@ -28,9 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut server: Server<MySuperNiceProtocol> = Server::host(socket.into()).await?;
     let mut client: Client<MySuperNiceProtocol> = Client::connect(socket.into()).await?;
 
-    println!("[server] waiting for any network event...");
+    println!("[server] waiting for connection...");
     match server.event().await? {
-        Event::NewConnection(client_id) => {
+        ServerEvent::NewConnection(client_id) => {
             println!("[server] new connection: {}", client_id);
             println!("[server] sending '{server_msg:?}' to '{client_id}'");
             server.send(client_id, &server_msg).await?;
@@ -42,15 +42,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         println!("[client] waiting for message...");
-        let msg = client.recv().await?;
-        println!("[client] received '{msg:?}'");
-        println!("[client] sending '{client_msg:?}'");
-        client.send(&client_msg).await?;
+        match client.event().await? {
+            ClientEvent::Message(msg) => {
+                println!("[client] received '{msg:?}'");
+                println!("[client] sending '{client_msg:?}'");
+                client.send(&client_msg).await?;
+            }
+            event => {
+                println!("[client] unexpected event: {event:?}");
+            }
+        }
     }
 
-    println!("[server] waiting for any network event...");
+    println!("[server] waiting for message...");
     match server.event().await? {
-        Event::Message(client_id, msg) => {
+        ServerEvent::Message(client_id, msg) => {
             println!("[server] received '{msg:?}' from '{client_id}'");
         }
         event => {
