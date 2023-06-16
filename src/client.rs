@@ -1,5 +1,5 @@
 use crate::common::{bind_stream, FramedStream};
-use crate::protocol::{Message, MessageError};
+use crate::message::{Message, MessageError};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use std::io;

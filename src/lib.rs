@@ -1,10 +1,10 @@
 mod client;
 mod common;
-mod protocol;
+mod message;
 mod server;
 
 pub use client::{Client, ClientError, Event as ClientEvent};
-pub use protocol::{Message, MessageError};
+pub use message::{Message, MessageError};
 pub use server::{ClientId, Event as ServerEvent, Server, ServerError};
 
 #[cfg(test)]
